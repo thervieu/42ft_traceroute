@@ -6,6 +6,11 @@ void usage_error(void) {
     exit(1);
 }
 
+// -f first ttl value, default is 1
+// -m max ttl value, default is 30
+// -i interface to use, default is first in routing
+// -n Do not try to map the IP addresses to host names when diplaying names
+// -p UDP destination port to use increments each probe, ICMP sequence number also increments each probe, TCP constant destination port to use
 void help_and_exit(void) {
     printf("FT_PING: help:\nusage: ./ft_ping [-h, -v, -c, -D -n, -t, -w] hostname\n");
     printf("\t-h\n\t\tprint this help\n\n");
