@@ -18,6 +18,8 @@
 # include <errno.h>
 # include <fcntl.h>
 
+# define NB_PROBES 3
+
 typedef struct s_env {
 
     // names
@@ -38,27 +40,17 @@ typedef struct s_env {
     char buffer_control[200];
 
     // communication data
-    unsigned int seq;
+    unsigned int port_sequence; // just don't print the dns. bonus -n
     unsigned int interval;
+    char *interface;
 
-    unsigned int timeout; // default 10s
-    unsigned int count; // -c count number of packets to send
-    bool verbose; // -v verbose to print errors in packets
-    bool numeric; // just don't print the weird sub dns rebound. bonus -n
-    bool unix_time; // print unix time. bonus -D
-    unsigned int ttl; // 64 by default is it ??. bonus -ttl
-    unsigned int deadline; // bonus -w int deadline, seconds after which we quit the program
-    struct timeval deadline_timeval;
-    unsigned int time_spent_sending_packets; // bonus -w int deadline, seconds after which we quit the program
+    unsigned int timeout; // default 1s
+    unsigned int first_ttl; // -f premier ttl
+    unsigned int max_ttl; // -c count number of packets to send
+    bool numeric; // just don't print the dns. bonus -n
 
     // socket
     int socket_fd;
-
-    // calculus data
-    unsigned int packets_sent;
-    unsigned int packets_recv;
-    double min;
-    double max;
 } t_env;
 
 t_env env;

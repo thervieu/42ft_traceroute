@@ -1,31 +1,24 @@
 #include "../incs/ft_traceroute.h"
 
 void usage_error(void) {
-    printf("usage: ./ft_ping [-h, -f, -n -p, -W, -ttl] hostname\n");
+    printf("usage: ./ft_ping [-h, -f, -m, -i, -n, -p] hostname\n");
     printf("\t./ft_ping -h to print the help\n");
     exit(1);
 }
 
-// -f first ttl value, default is 1
-// -m max ttl value, default is 30
-// -i interface to use, default is first in routing
-// -n Do not try to map the IP addresses to host names when diplaying names
-// -p UDP destination port to use increments each probe, ICMP sequence number also increments each probe, TCP constant destination port to use
 void help_and_exit(void) {
     printf("FT_PING: help:\nusage: ./ft_ping [-h, -v, -c, -D -n, -t, -w] hostname\n");
     printf("\t-h\n\t\tprint this help\n\n");
-    printf("\t-v\n\t\tVerbose output. Do not suppress DUP replies when pinging multicast address.\n\n");
-    printf("\t-c count\n\t\tStop after sending count ECHO_REQUEST packets. With deadline option, ping waits for count ECHO_REPLY packets, until the timeout expires.\n\n");
-    printf("\t-D\n\t\tPrint timestamp (unix time + microseconds as in gettimeofday) before each line.\n\n");
-    printf("\t-n\n\t\tNumeric output only. No attempt will be made to lookup symbolic names for host addresses.\n\n");
-    printf("\t-t ttl\n\t\tping only. Set the IP Time to Live.\n"); // print response ttl
-    printf("\t-w deadline\n\t\tSpecify a timeout, in seconds, before ping exits regardless of how many packets have been sent or received. In this case ping does not stop after ");
-    printf("count packet are sent, it waits either for deadline expire. or until count probes are answered or for some error notification from network.\n\n");
+    printf("\t-f first_ttl\n\t\tSpecifies with what TTL to start. Defaults to 1.\n\n");
+    printf("\t-m max_ttl\n\t\tSpecifies the maximum number of hops (max time-to-live value) traceroute will probe. The default is 30.\n\n");
+    printf("\t-i interface\n\t\tSpecifies the interface through which traceroute should send packets. By default, the interface is selected according to the routing table.\n\n");
+    printf("\t-n\n\t\tDo not try to map IP addresses to host names when displaying them.\n\n");
+    printf("\t-p port\n\t\tFor ICMP tracing, specifies the initial ICMP sequence value (incremented by each probe too).\n"); // print response ttl
     exit(0);
 }
 
 void error_exit(char *err) {
-    printf("ft_ping: %s\n", err);
+    printf("ft_traceroute: %s\n", err);
     exit(1);
 }
 
@@ -67,15 +60,6 @@ void print_stats(t_env *env) {
     printf("print_stats\n");
     exit(0);
 }
-
-
-void signal_handler(int signal) {
-    if (signal == SIGINT) {
-        print_stats(&env);
-    }
-    return ;
-}
-
 
 char *get_ip_from_hostname(char *hostname) {
     struct addrinfo hints;
@@ -139,18 +123,13 @@ void create_socket(t_env *env) {
 
 void init_env(t_env *env) {
     env->pid = getpid();
-    env->seq = 0;
-    env->interval = 1;
-    env->timeout = 10;
-    env->time_spent_sending_packets = 0; // valeure 'time' dans les stats affichées
+    env->port_sequence = 0;
+    env->timeout = 1;
+    env->first_ttl = 1;
+    env->max_ttl = 30;
+    env-> interface = "eth0"; // get_default_ipv4_interface();
 
-    // bonuses default
-    env->count = 0; // 0 for infinite
-    env->verbose = false; // ne sert à rien ??
     env->numeric = false;
-    env->unix_time = false;
-    env->ttl = 64;
-    env->deadline = 0; // 0 for infinite
 }
 
 void arg_handler(t_env *env, int ac, char **av) {
@@ -183,10 +162,10 @@ short ft_checksum(unsigned short *data, int len) {
 }
 
 void print_host(t_env env) {
-    printf("PING %s (%s) 56(84) bytes of data.\n", env.hostname, env.host_dst);
+    printf("traceroute to %s (%s), %d hops max, 60 bytes of data.\n", env.hostname, env.host_dst, env.max_ttl);
 }
 
-void setup_send(t_env *env) {
+void setup_send(t_env *env, unsigned int ttl, int nb_probe) {
     ft_memset(&(env->buffer), 0, sizeof(env->buffer));
 
     env->ip->ip_v = 4;            // Set the IP version to IPv4
@@ -195,7 +174,7 @@ void setup_send(t_env *env) {
     env->ip->ip_len = htons(sizeof(env->buffer));
     env->ip->ip_id = 0; // Unique identification (you can choose a suitable value)
     env->ip->ip_off = 0;          // Fragment offset and flags (set to 0 for no fragmentation)
-    env->ip->ip_ttl = env->ttl;         // Time to Live (adjust as needed)
+    env->ip->ip_ttl = ttl;         // Time to Live (adjust as needed)
     env->ip->ip_p = env->res->ai_protocol;  // Protocol (e.g., ICMP)
     env->ip->ip_sum = 0;          // Set checksum to 0 for now (calculate it later)
     inet_pton(env->res->ai_family, env->host_src, &(env->ip->ip_src.s_addr));
@@ -204,13 +183,10 @@ void setup_send(t_env *env) {
     env->icmp->icmp_type = ICMP_ECHO;
     env->icmp->icmp_code = 0;
     env->icmp->icmp_id = env->pid;
-    env->icmp->icmp_seq = env->seq;
+    env->icmp->icmp_seq = env->port_sequence + nb_probe;
 
     env->icmp->icmp_cksum = 0;
     env->icmp->icmp_cksum = ft_checksum((unsigned short *) env->icmp, sizeof(env->icmp));
-    
-    // increment sequence number
-    env->seq++;
 }
 
 void setup_receive(t_env *env) {
@@ -226,27 +202,26 @@ void setup_receive(t_env *env) {
 	env->msg.msg_flags = 0;
 }
 
-void receive_packet(int seconds_to_wait, t_env *env) {
+void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
+    (void)ttl; // needed for structure place ??
+    (void)send_time; // needed for calculating time elapsed since send
     setup_receive(env);
     
 	struct timeval tv_current;
 	struct timeval tv_next;
 
 	if (gettimeofday(&tv_current, NULL) < 0)
-		error_exit("Error gettimeofday\n");
+		error_exit("gettimeofday");
 	tv_next = tv_current;
-	tv_next.tv_sec += seconds_to_wait; // interval or packet receive timeout (mélangé pck -W pas implémenté)
+	tv_next.tv_sec += env-> timeout;
+    int packets_recv = 0;
     while (1) {
         char buffer[200];
-        ssize_t packet_size = recvfrom(env->socket_fd, buffer, sizeof(buffer), MSG_DONTWAIT, NULL, NULL);
+        ssize_t packet_size = recvfrom(env->socket_fd, buffer, sizeof(buffer), 0, NULL, NULL);
 
         if (packet_size < 0) {
-            // if no packets received and time elapsed, break
             if (gettimeofday(&tv_current, NULL) < 0)
-                error_exit("Error gettimeofday\n");
-            if (env->deadline != 0 && (tv_current.tv_sec * 1000000 + tv_current.tv_usec) >= (env->deadline_timeval.tv_sec * 1000000 + env->deadline_timeval.tv_usec)) {
-                kill(getpid(), SIGINT); // -w deadline
-            }
+                error_exit("gettimeofday");
             if (tv_current.tv_sec * 1000000 + tv_current.tv_usec  < tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
                 break; // pas sur de la formule
             }
@@ -259,60 +234,47 @@ void receive_packet(int seconds_to_wait, t_env *env) {
         struct iphdr *ip_packet = (struct iphdr *) buffer;
         struct icmp *icmp_packet = (struct icmp *) (buffer + (ip_packet->ihl * 4));
 
-        env->packets_recv++;
-        // calculate stats
+        packets_recv += 1;
         if (icmp_packet->icmp_type == ICMP_TIME_EXCEEDED) {
             printf("Time to live exceeded.\n");
         } else {
-            // -D, -n, 
+            // set time in struct
+            struct timeval receive_time;
+            (void)receive_time; // receive_time - send_time
             printf("%ld bytes from %s: icmp_seq=%u ttl=%d\n",
                 packet_size - sizeof(struct iphdr), inet_ntoa(*(struct in_addr *)&ip_packet->saddr),
                 icmp_packet->icmp_seq, ip_packet->ttl);
         }
-        while (1) {
-            // if received all packets, quit
-            if (env->count != 0 && env->packets_recv == env->count) {
-                break ;
-            }
-            // if packet received and time elapsed, break
-            if (gettimeofday(&tv_current, NULL) < 0)
-                error_exit("Error gettimeofday\n");
-            if (env->deadline != 0 && (tv_current.tv_sec * 1000000 + tv_current.tv_usec) >= (env->deadline_timeval.tv_sec * 1000000 + env->deadline_timeval.tv_usec)) {
-                kill(getpid(), SIGINT);  // -w deadline
-            }
-            if (tv_current.tv_sec * 1000000 + tv_current.tv_usec  < tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
-                break; // pas sur de la formule
-            }
+        if (packets_recv == NB_PROBES) {
+            break ;
+        }
+
+        if (gettimeofday(&tv_current, NULL) < 0)
+            error_exit("gettimeofday");
+        if (tv_current.tv_sec * 1000000 + tv_current.tv_usec  < tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
+            break; // pas sur de la formule
         }
     }
 }
 
-void ping_loop(t_env *env) {
-
-
-    env->packets_sent = 0;
-    env->packets_recv = 0;
-
-    while (true) {
-        struct timeval beg;
-        struct timeval cur;
-        setup_send(env);
-        if (gettimeofday(&beg, NULL) < 0)
-            error_exit("Error gettimeofday\n");
-        if (sendto(env->socket_fd, env->buffer, sizeof(env->buffer), 0, env->res->ai_addr, env->res->ai_addrlen) < 0) {
-            error_exit("sendto: could not send");
+void traceroute(t_env *env) {
+    unsigned int ttl = env->first_ttl;
+    while (ttl <= env->max_ttl) {
+        struct timeval send_time;
+        int i = 0;
+        if (gettimeofday(&send_time, NULL) < 0)
+            error_exit("gettimeofday");
+        while (i < NB_PROBES) {
+            setup_send(env, ttl, i);
+            // set time send for probe i
+            if (sendto(env->socket_fd, env->buffer, sizeof(env->buffer), 0, env->res->ai_addr, env->res->ai_addrlen) < 0) {
+                error_exit("sendto: could not send");
+            }
+            i += 1;
         }
-        // time print start
-        env->packets_sent++;
-        if (env->count != 0 && env->packets_sent == env->count) {
-            break ;
-        }
-        if (gettimeofday(&cur, NULL) < 0)
-            error_exit("Error gettimeofday\n");
-        receive_packet(env->interval, env); // interval = 1
-        env->time_spent_sending_packets += (cur.tv_usec - beg.tv_usec) / 1000;
+        receive_packet(send_time, ttl, env); // interval = 1
+        ttl += 1;
     }
-    receive_packet(env->timeout, env);
     return ;
 }
 
@@ -320,7 +282,6 @@ int main(int ac, char **av) {
     if (ac < 2) {
         usage_error();
     }
-    signal(SIGINT, signal_handler);
 
     init_env(&env); // set default values
     arg_handler(&env, ac, av); // get hostname and options
@@ -332,7 +293,7 @@ int main(int ac, char **av) {
     env.icmp = (struct icmp *)(env.ip + 1);
 
     print_host(env);
-    ping_loop(&env);
+    traceroute(&env);
 
     return 0;
 }
