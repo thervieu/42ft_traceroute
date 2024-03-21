@@ -297,6 +297,9 @@ void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
         struct iphdr *ip_packet = (struct iphdr *) buffer;
         struct icmp *icmp_packet = (struct icmp *) (buffer + (ip_packet->ihl * 4));
 
+        char *ip_src = inet_ntoa(*(struct in_addr *)&ip_packet->saddr);
+        struct hostent *host_entry = gethostbyaddr((struct in_addr *)&ip_packet->saddr, sizeof(struct in_addr), AF_INET);
+        char *host_src = host_entry ? host_entry->h_name : ip_src;
         packets_recv += 1;
         // if (icmp_packet->icmp_type == ICMP_TIME_EXCEEDED) {
         //     printf("Time to live exceeded.\n");
@@ -304,9 +307,10 @@ void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
             // set time in struct
             struct timeval receive_time;
             (void)receive_time; // receive_time - send_time
-            printf("%ld bytes from %s: icmp_seq=%u ttl=%d\n",
-                packet_size - sizeof(struct iphdr), inet_ntoa(*(struct in_addr *)&ip_packet->saddr),
+            printf("%ld bytes from %s (%s): icmp_seq=%u ttl=%d\n",
+                packet_size - sizeof(struct iphdr), host_src, ip_src,
                 icmp_packet->icmp_seq, ip_packet->ttl);
+            
         // }
         if (packets_recv == NB_PROBES) {
             printf("break probes\n");
@@ -339,16 +343,15 @@ void traceroute(t_env *env) {
     while (ttl <= env->max_ttl) {
         printf("enter loop ttl = %d\n", ttl);
         struct timeval send_time;
-        int i = 0;
         if (gettimeofday(&send_time, NULL) < 0)
             error_exit("gettimeofday");
-        while (i < NB_PROBES) {
+        for(int i = 0; i < NB_PROBES; i++) {
+            printf("probe %d\n", i);
             setup_send(env, ttl, i);
             // set time send for probe i
             if (sendto(env->socket_fd, env->buffer, sizeof(env->buffer), 0, env->res->ai_addr, env->res->ai_addrlen) < 0) {
                 error_exit("sendto: could not send");
             }
-            i += 1;
         }
         receive_packet(send_time, ttl, env); // interval = 1
         ttl += 1;
