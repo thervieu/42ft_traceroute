@@ -55,6 +55,19 @@ void	*ft_memset(void *b, int c, size_t len)
 	return (b);
 }
 
+char *ft_strdup(char *s) {
+    size_t len = ft_strlen(s) + 1;
+    char *dup = malloc(len);
+    if (dup == NULL) {
+        error_exit("malloc failed");
+    }
+    for (size_t i = 0; i < len; i++) {
+        dup[i] = s[i];
+    }
+    dup[len] = '\0';
+    return dup;
+}
+
 void print_stats(t_env *env) {
     (void)env;
     printf("print_stats\n");
@@ -92,7 +105,11 @@ char *get_ip_from_hostname(char *hostname) {
 }
 
 void create_socket(t_env *env) {
-    env->host_src = "0.0.0.0"; // us
+    if (getuid() != 0) {
+        error_exit("not running as root: socket will fail");
+    }
+    
+    env->host_src = "0.0.0.0"; // nous
     env->host_dst = get_ip_from_hostname(env->hostname);
 
     ft_memset(&(env->hints), 0, sizeof(env->hints));
@@ -127,18 +144,62 @@ void init_env(t_env *env) {
     env->timeout = 1;
     env->first_ttl = 1;
     env->max_ttl = 30;
-    env-> interface = "eth0"; // get_default_ipv4_interface();
+    env->interface = "eth0"; // get_default_ipv4_interface();
 
     env->numeric = false;
 }
 
+
+bool is_argument(char *str) {
+    // List of valid options
+    char *options[] = { "-f", "-m", "-p", "-i", "-n" };
+    int num_options = sizeof(options) / sizeof(options[0]);
+
+    for (int i = 0; i < num_options; i++) {
+        if (ft_strcmp(str, options[i]) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 void arg_handler(t_env *env, int ac, char **av) {
     char *hostname = NULL;
     for (int i = 1; i < ac; i++) {
-        if (hostname == NULL) {
-            hostname = av[i];
+        if (hostname != NULL && is_argument(av[i]) == false) {
+            printf("ft_traceroute: unsupported agument %s\n", av[i]);
+            exit(1);
+        }
+        if (hostname == NULL && is_argument(av[i]) == false) {
+            hostname = ft_strdup(av[i]);
+        } else if (ft_strcmp(av[i], "-f") == 0) {
+            if (i + 1 >= ac) {
+                error_exit("missing argument for -f option");
+            }
+            env->first_ttl = atoi(av[i + 1]);
+            i++;
+        } else if (ft_strcmp(av[i], "-m") == 0) {
+            if (i + 1 >= ac) {
+                error_exit("missing argument for -m option");
+            }
+            env->max_ttl = atoi(av[i + 1]);
+            i++;
+        } else if (ft_strcmp(av[i], "-i") == 0) {
+            if (i + 1 >= ac) {
+                error_exit("missing argument for -i option");
+            }
+            env->interface = av[i + 1];
+            i++;
+        } else if (ft_strcmp(av[i], "-n") == 0) {
+            env->numeric = true;
+        } else if (ft_strcmp(av[i], "-p") == 0 ) {
+            if (i + 1 >= ac) {
+                error_exit("missing argument for -p option");
+            }
+            env->port_sequence = atoi(av[i]);
         } else {
-            error_exit("too many arguments");
+            error_exit("fqdn or ipv4 already set");
         }
     }
     env->hostname = hostname;
@@ -213,8 +274,9 @@ void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
 	if (gettimeofday(&tv_current, NULL) < 0)
 		error_exit("gettimeofday");
 	tv_next = tv_current;
-	tv_next.tv_sec += env-> timeout;
+	tv_next.tv_sec += env->timeout;
     int packets_recv = 0;
+    printf("receive_packet\n");
     while (1) {
         char buffer[200];
         ssize_t packet_size = recvfrom(env->socket_fd, buffer, sizeof(buffer), 0, NULL, NULL);
@@ -222,7 +284,8 @@ void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
         if (packet_size < 0) {
             if (gettimeofday(&tv_current, NULL) < 0)
                 error_exit("gettimeofday");
-            if (tv_current.tv_sec * 1000000 + tv_current.tv_usec  < tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
+            if (tv_current.tv_sec * 1000000 + tv_current.tv_usec > tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
+                printf("break timeout\n");
                 break; // pas sur de la formule
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -235,31 +298,46 @@ void receive_packet(struct timeval send_time, unsigned int ttl, t_env *env) {
         struct icmp *icmp_packet = (struct icmp *) (buffer + (ip_packet->ihl * 4));
 
         packets_recv += 1;
-        if (icmp_packet->icmp_type == ICMP_TIME_EXCEEDED) {
-            printf("Time to live exceeded.\n");
-        } else {
+        // if (icmp_packet->icmp_type == ICMP_TIME_EXCEEDED) {
+        //     printf("Time to live exceeded.\n");
+        // } else {
             // set time in struct
             struct timeval receive_time;
             (void)receive_time; // receive_time - send_time
             printf("%ld bytes from %s: icmp_seq=%u ttl=%d\n",
                 packet_size - sizeof(struct iphdr), inet_ntoa(*(struct in_addr *)&ip_packet->saddr),
                 icmp_packet->icmp_seq, ip_packet->ttl);
-        }
+        // }
         if (packets_recv == NB_PROBES) {
+            printf("break probes\n");
             break ;
         }
 
         if (gettimeofday(&tv_current, NULL) < 0)
             error_exit("gettimeofday");
-        if (tv_current.tv_sec * 1000000 + tv_current.tv_usec  < tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
-            break; // pas sur de la formule
+        if (tv_current.tv_sec * 1000000 + tv_current.tv_usec > tv_next.tv_sec * 1000000 + tv_next.tv_usec) {
+            printf("break 3\n");
+            break;
         }
     }
 }
 
+void print_env(t_env *env) {
+    printf("env->pid |%d|\n", env->pid);
+    printf("env->port_sequence |%d|\n", env->port_sequence);
+    printf("env->timeout |%d|\n", env->timeout);
+    printf("env->first_ttl |%d|\n", env->first_ttl);
+    printf("env->max_ttl |%d|\n", env->max_ttl);
+    printf("env->interface |%s|\n", env->interface);
+    printf("env->numeric |%s|\n", env->numeric ? "true" : "false");
+    printf("\n\n");
+}
+
 void traceroute(t_env *env) {
+    print_env(env);
     unsigned int ttl = env->first_ttl;
     while (ttl <= env->max_ttl) {
+        printf("enter loop ttl = %d\n", ttl);
         struct timeval send_time;
         int i = 0;
         if (gettimeofday(&send_time, NULL) < 0)
@@ -274,6 +352,7 @@ void traceroute(t_env *env) {
         }
         receive_packet(send_time, ttl, env); // interval = 1
         ttl += 1;
+        printf("\n");
     }
     return ;
 }
